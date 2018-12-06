@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+
+bastion_hosts=( 'rj@jumphost1:22' 'jumphost2')
+jump_hosts=( '10.0.1.1:1234' '10.0.1.1:2345' )
+serv_hosts=( 'rj@domain1' 'domain2:5567' )
+SSH_HOST_MAP=( "$(declare -p bastion_hosts)" "$(declare -p jump_hosts)" "$(declare -p serv_hosts)" )

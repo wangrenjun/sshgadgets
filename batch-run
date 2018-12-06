@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+
+# Run the commands on remote hosts one by one
+
+readonly SCRIPT_NAME="$(basename $0)"
+readonly SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+source "${SCRIPT_DIR}/shcommons/essentials.sh"
+source "${SCRIPT_DIR}/shcommons/extras.sh"
+source "${SCRIPT_DIR}/shcommons/log.sh"
+
+usage()
+{
+    pusage "$SCRIPT_NAME [-f|--file <script file>] [-s|--source <host map file>] [<host>...]"
+    pinfol 'Running this script require the openssh client to support ProxyJump(version is at least 7.3)'
+    exit
+}
+
+run_command()
+{
+    a=$(extract_parts_from_userdomain "${1}")
+    eval "declare -A destination=${a#*=}"
+    if [ "${#destination[@]}" = 0 ] || is_empty "${destination['hostname']}"; then
+        die "$ENO_ERROR" "${SCRIPT_NAME}:" "hostname not found in the '${1}'"
+    fi
+    ssh_command="ssh -Tq \
+-o PasswordAuthentication=no \
+-o NumberOfPasswordPrompts=0 \
+-o StrictHostKeyChecking=no \
+-o UserKnownHostsFile=/dev/null \
+-o ConnectTimeout=8 \
+-o ConnectionAttempts=2 "
+    if [ "${#jump_hosts[@]}" \> 0 ]; then
+        ssh_command+=' -J '
+        ssh_command+=$(join_by , "${jump_hosts[@]}")
+        ssh_command+=' '
+    fi
+    ssh_command+="${destination['port']:+ -p ${destination['port']} }"
+    ssh_command+="${destination['username']:+ ${destination['username']}@}"
+    ssh_command+="${destination['hostname']}"
+    for script in "${script_files[@]}"; do
+        eval "$ssh_command < $script 2> /dev/null"
+        [ "${?}" != 0 ] && perrorl "Running \"$ssh_command < $script\" failed"
+    done
+    if is_nonempty "$remote_command"; then
+        eval "$ssh_command '$remote_command' 2> /dev/null"
+        [ "${?}" != 0 ] && perrorl "Running \"$ssh_command '$remote_command'\" failed"
+    fi
+}
+
+main()
+{
+    opts="$(getopt -o f:s:h --long file:,source:,help -n $SCRIPT_NAME -- ${@})"
+    if [ "${?}" != 0 ]; then
+        perrorl "${SCRIPT_NAME}:" 'Failed to parsing options'
+        usage
+    fi
+    eval set -- "$opts"
+    while true; do
+        case "${1}" in
+        -f | --file ) script_files+=( "${2}" ); shift 2 ;;
+        -s | --source ) map_file="${2}"; shift 2 ;;
+        -h | --help ) usage ;;
+        -- ) shift; break ;;
+        * ) die "$ENO_ERROR" "${SCRIPT_NAME}:" 'Internal error' ;;
+        esac
+    done
+    if [ "${#}" = 0 ] && is_empty "$map_file" && [ "${#SSH_HOST_MAP[@]}" = 0 ]; then
+        usage
+    fi
+    remote_command=$(nbread_input)
+    if is_empty "$remote_command" && [ "${#script_files[@]}" = 0 ]; then
+        usage
+    fi
+    while [ "${#}" -gt 0 ]; do
+        run_command "${1}"
+        shift
+    done
+    if is_nonempty "$map_file"; then
+        if ! . "$map_file"; then
+            die "$ENO_ERROR" "${SCRIPT_NAME}:" "Failed to source $map_file"
+        fi
+    fi
+    jump_hosts=()
+    for i in "${SSH_HOST_MAP[@]}"; do
+        eval "declare -a host_list=${i#*=}"
+        for j in "${host_list[@]}"; do
+            run_command "$j"
+        done
+        jump_hosts+=( ${host_list[0]} )
+    done
+}
+
+main "${@}"

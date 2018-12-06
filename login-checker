@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+
+# Cross-check login without password (passwordless login)
+
+readonly SCRIPT_NAME="$(basename $0)"
+readonly SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+source "${SCRIPT_DIR}/shcommons/essentials.sh"
+source "${SCRIPT_DIR}/shcommons/extras.sh"
+source "${SCRIPT_DIR}/shcommons/log.sh"
+
+usage()
+{
+    pusage "$SCRIPT_NAME [-s|--source <host map file>] [<host>...]"
+    pinfol 'Running this script require the openssh client to support ProxyJump(version is at least 7.3)'
+    exit
+}
+
+check_login()
+{
+    a=$(extract_parts_from_userdomain "${1}")
+    eval "declare -A destination=${a#*=}"
+    if [ "${#destination[@]}" = 0 ] || is_empty "${destination['hostname']}"; then
+        die "$ENO_ERROR" "${SCRIPT_NAME}:" "hostname not found in the '${1}'"
+    fi
+    ssh_command="ssh -Tq \
+-o PasswordAuthentication=no \
+-o NumberOfPasswordPrompts=0 \
+-o StrictHostKeyChecking=no \
+-o UserKnownHostsFile=/dev/null \
+-o ConnectTimeout=8 \
+-o ConnectionAttempts=2 "
+    if [ "${#jump_hosts[@]}" \> 0 ]; then
+        ssh_command+=' -J '
+        ssh_command+=$(join_by , "${jump_hosts[@]}")
+        ssh_command+=' '
+    fi
+    ssh_command+="${destination['port']:+ -p ${destination['port']} }"
+    ssh_command+="${destination['username']:+ ${destination['username']}@}"
+    ssh_command+="${destination['hostname']}"
+    eval "$ssh_command 'exit' &> /dev/null"
+    [ "${?}" = 0 ] && psuccessl "'$ssh_command exit' connected" || perrorl "'$ssh_command exit' connect failed"
+}
+
+main()
+{
+    opts="$(getopt -o s:h --long source:,help -n $SCRIPT_NAME -- ${@})"
+    if [ "${?}" != 0 ]; then
+        perrorl "${SCRIPT_NAME}:" 'Failed to parsing options'
+        usage
+    fi
+    eval set -- "$opts"
+    while true; do
+        case "${1}" in
+        -s | --source ) map_file="${2}"; shift 2 ;;
+        -h | --help ) usage ;;
+        -- ) shift; break ;;
+        * ) die "$ENO_ERROR" "${SCRIPT_NAME}:" 'Internal error' ;;
+        esac
+    done
+    if [ "${#}" = 0 ] && is_empty "$map_file" && [ "${#SSH_HOST_MAP[@]}" = 0 ]; then
+        usage
+    fi
+    while [ "${#}" -gt 0 ]; do
+        check_login "${1}"
+        shift
+    done
+    if is_nonempty "$map_file"; then
+        if ! . "$map_file"; then
+            die "$ENO_ERROR" "${SCRIPT_NAME}:" "Failed to source $map_file"
+        fi
+    fi
+    
+    # Cross the jumper to check login
+    eval "declare -a host_list=${SSH_HOST_MAP[0]#*=}"
+    host_queue+=( "${host_list[@]}" )   # Enqueue the peer
+    k=1
+    until [ "${#host_queue[@]}" = 0 ] ; do
+        size="${#host_queue[@]}"
+        for ((i = 0; i < size; i++)); do
+            OIFS="$IFS"
+            IFS=',' read -r -a hosts <<< "${host_queue[0]}" # Peep
+            host_queue=(${host_queue[@]:1}) # Dequeue
+            IFS="$OIFS"
+            dest="${hosts[@]: -1}"
+            jump_hosts=("${hosts[@]:0:${#hosts[@]}-1}")
+            check_login "$dest"
+            [ "$k" -ge "${#SSH_HOST_MAP[@]}" ] && continue
+            eval "declare -a host_list=${SSH_HOST_MAP[$k]#*=}"
+            for ((j = 0; j < "${#host_list[@]}"; j++)); do
+                host_queue+=( "$(join_by , ${hosts[@]}),${host_list[$j]}" ) # Enqueue the jumper and target
+            done
+        done
+        let k++
+    done
+}
+
+main "${@}"

@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+
+# Install the public key(.pub file) in host's authorized_keys for passwordless SSH login
+
+readonly SCRIPT_NAME="$(basename $0)"
+readonly SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+source "${SCRIPT_DIR}/shcommons/essentials.sh"
+source "${SCRIPT_DIR}/shcommons/extras.sh"
+source "${SCRIPT_DIR}/shcommons/log.sh"
+
+usage()
+{
+    pusage "$SCRIPT_NAME [-i|--identity <public key file>] [-s|--source <host map file>] [<host>...]"
+    pinfol 'Running this script require the openssh client to support ProxyJump(version is at least 7.3)'
+    exit
+}
+
+inst_key()
+{
+    a=$(extract_parts_from_userdomain "${1}")
+    eval "declare -A destination=${a#*=}"
+    if [ "${#destination[@]}" = 0 ] || is_empty "${destination['hostname']}"; then
+        die "$ENO_ERROR" "${SCRIPT_NAME}:" "hostname not found in the '${1}'"
+    fi
+    ssh_command="ssh -Tq -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+    if [ "${#jump_hosts[@]}" \> 0 ]; then
+        ssh_command+=' -J '
+        ssh_command+=$(join_by , "${jump_hosts[@]}")
+        ssh_command+=' '
+    fi
+    ssh_command+="${destination['port']:+ -p ${destination['port']} }"
+    ssh_command+="${destination['username']:+ ${destination['username']}@}"
+    ssh_command+="${destination['hostname']}"
+    for f in "${pubkey_files[@]}"; do
+        # Append key to the authorized_keys of the target host and only if the key don't exist
+        remote_command="mkdir -p ~/.ssh \
+&& chmod 700 ~/.ssh \
+&& ! grep -- \"$(<${f})\" ~/.ssh/authorized_keys &> /dev/null \
+&& cat >> ~/.ssh/authorized_keys \
+&& chmod 600 ~/.ssh/authorized_keys"
+        eval "$ssh_command '$remote_command' < $f &> /dev/null"
+        [ "${?}" != 0 ] && perrorl "Running \"$ssh_command '$remote_command' < $f\" failed"
+    done
+}
+
+main()
+{
+    opts="$(getopt -o i:s:h --long identity:,source:,help -n $SCRIPT_NAME -- ${@})"
+    if [ "${?}" != 0 ]; then
+        perrorl "${SCRIPT_NAME}:" 'Failed to parsing options'
+        usage
+    fi
+    eval set -- "$opts"
+    while true; do
+        case "${1}" in
+        -i | --identity ) pubkey_files+=( "${2}" ); shift 2 ;;
+        -s | --source ) map_file="${2}"; shift 2 ;;
+        -h | --help ) usage ;;
+        -- ) shift; break ;;
+        * ) die "$ENO_ERROR" "${SCRIPT_NAME}:" 'Internal error' ;;
+        esac
+    done
+    if [ "${#}" = 0 ] && is_empty "$map_file" && [ "${#SSH_HOST_MAP[@]}" = 0 ]; then
+        usage
+    fi
+    if [ "${#pubkey_files[@]}" = 0 ]; then
+        # When run without identity arguments,
+        # it adds the files ~/.ssh/identity.pub, ~/.ssh/id_rsa.pub, ~/.ssh/id_dsa.pub, ~/.ssh/id_ecdsa.pub, ~/.ssh/id_ed25519.pub by default
+        can_read ~/.ssh/identity.pub && pubkey_files+=( ~/.ssh/identity.pub )
+        can_read ~/.ssh/id_rsa.pub && pubkey_files+=( ~/.ssh/id_rsa.pub )
+        can_read ~/.ssh/id_dsa.pub && pubkey_files+=( ~/.ssh/id_dsa.pub )
+        can_read ~/.ssh/id_ecdsa.pub && pubkey_files+=( ~/.ssh/id_ecdsa.pub )
+        can_read ~/.ssh/id_ed25519.pub && pubkey_files+=( ~/.ssh/id_ed25519.pub )
+        if [ "${#pubkey_files[@]}" = 0 ]; then
+            die "$ENO_ERROR" "${SCRIPT_NAME}:" "Can't find the default public key files"
+        fi
+    fi
+    while [ "${#}" -gt 0 ]; do
+        inst_key "${1}"
+        shift
+    done
+    if is_nonempty "$map_file"; then
+        if ! . "$map_file"; then
+            die "$ENO_ERROR" "${SCRIPT_NAME}:" "Failed to source $map_file"
+        fi
+    fi
+    jump_hosts=()
+    for i in "${SSH_HOST_MAP[@]}"; do
+        eval "declare -a host_list=${i#*=}"
+        for j in "${host_list[@]}"; do
+            inst_key "$j"
+        done
+        jump_hosts+=( ${host_list[0]} )
+    done
+}
+
+main "${@}"

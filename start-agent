@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+
+# Start ssh-agent and register private key identities for SSH agent forwarding
+# This file should be sourced in .bashrc
+
+SCRIPT_NAME="start_agent"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+source "${SCRIPT_DIR}/shcommons/essentials.sh"
+source "${SCRIPT_DIR}/shcommons/extras.sh"
+source "${SCRIPT_DIR}/shcommons/log.sh"
+
+AGENT_ENV_FILE=~/.ssh/agent.env
+#KEY_PAIRS_DIR=~/.ssh/keypairs/
+KEY_PAIRS_DIR=~/.ssh/
+
+usage()
+{
+    pusage ". $SCRIPT_NAME [-f|--file <agent env file>] [-d|--dir <keys dir>] [<key file>...]"
+}
+
+load_env()
+{
+    can_read "${1}" && . "${1}" &> /dev/null
+}
+
+# Start agent, source env and save it to file for next time
+start_agent()
+{
+    if $(ssh-agent 1> "${1}" 2> /dev/null); then
+        . "${1}" &> /dev/null
+    else
+        eval "$(ssh-agent -s)" > /dev/null
+        echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK}; export SSH_AUTH_SOCK;" > "${1}"
+        echo "SSH_AGENT_PID=${SSH_AGENT_PID}; export SSH_AGENT_PID;" >> "${1}"
+    fi
+    chmod 600 "${1}"
+}
+
+register_keys()
+{
+    # Register keys under the directory
+    is_nonempty "$key_pairs_dir" && find "$key_pairs_dir" -type f \( ! -name "*.pub" ! -name ".*" \) | xargs ssh-add &> /dev/null
+    # Register keys from arguments one by one
+    while [ "${#}" -gt 0 ]; do
+        ssh-add "${1}" &> /dev/null
+        shift
+    done
+}
+
+main()
+{
+    opts="$(getopt -o f:d:h --long file:,dir:,help -n $SCRIPT_NAME -- ${@})"
+    if [ "${?}" != 0 ]; then
+        perrorl "${SCRIPT_NAME}:" 'Failed to parsing options'
+        usage
+    fi
+    eval set -- "$opts"
+    while true; do
+        case "${1}" in
+        -f | --file ) agent_env_file="${2}"; shift 2 ;;
+        -d | --dir ) key_pairs_dir="${2}"; shift 2 ;;
+        -h | --help ) usage; shift; return ;;
+        -- ) shift; break ;;
+        * ) perrorl "$ENO_ERROR" "${SCRIPT_NAME}:" 'Internal error'; return ;;
+        esac
+    done
+    [ "${#}" = 0 ] && key_pairs_dir="${key_pairs_dir:-$KEY_PAIRS_DIR}"
+    agent_env_file="${agent_env_file:-$AGENT_ENV_FILE}"
+    load_env "$agent_env_file"
+    
+    # When 'ssh-add -l' return:
+    # 0: Agent running
+    # 1: Agent has no keys
+    # 2: Agent not running or not connection
+    case "$(ssh-add -l &> /dev/null; echo $?)" in
+    2)
+        if $(ps -e | grep ssh-agent &> /dev/null); then
+            # Clean agents
+            kill_all_by_name ssh-agent
+        fi
+        start_agent "$agent_env_file" ;;
+    esac
+    
+    # Add private key identities to the agent
+    register_keys "${@}"
+    
+    unset key_pairs_dir
+    unset agent_env_file
+}
+
+main "${@}"
+
+unset KEY_PAIRS_DIR
+unset AGENT_ENV_FILE
+unset SCRIPT_DIR
+unset SCRIPT_NAME

@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+
+# Copy file to the remote hosts one by one
+
+readonly SCRIPT_NAME="$(basename $0)"
+readonly SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+source "${SCRIPT_DIR}/shcommons/essentials.sh"
+source "${SCRIPT_DIR}/shcommons/extras.sh"
+source "${SCRIPT_DIR}/shcommons/log.sh"
+
+usage()
+{
+    pusage "$SCRIPT_NAME [-s|--source <file>] [-t|--target <file>] [-m|--map <host map file>] [<host>...]"
+    pinfol 'Running this script require the openssh client to support ProxyJump(version is at least 7.3)'
+    exit
+}
+
+copy()
+{
+    a=$(extract_parts_from_userdomain "${1}")
+    eval "declare -A destination=${a#*=}"
+    if [ "${#destination[@]}" = 0 ] || is_empty "${destination['hostname']}"; then
+        die "$ENO_ERROR" "${SCRIPT_NAME}:" "hostname not found in the '${1}'"
+    fi
+    
+    scp_command="scp -q \
+-o PasswordAuthentication=no \
+-o NumberOfPasswordPrompts=0 \
+-o StrictHostKeyChecking=no \
+-o UserKnownHostsFile=/dev/null \
+-o ConnectTimeout=8 \
+-o ConnectionAttempts=2 "
+    if [ "${#jump_hosts[@]}" \> 0 ]; then
+        scp_command+=' -o ProxyJump='
+        scp_command+=$(join_by , "${jump_hosts[@]}")
+        scp_command+=' '
+    fi
+    scp_command+="${destination['port']:+ -P ${destination['port']} }"
+    is_dir "$source_file" && scp_command+='-r '
+    scp_command+="$source_file "
+    scp_command+="${destination['username']:+ ${destination['username']}@}"
+    scp_command+="${destination['hostname']}"
+    scp_command+=":${target_file}"
+    eval "$scp_command &> /dev/null"
+    [ "${?}" != 0 ] && perrorl "Running \"$scp_command\" failed"
+}
+
+main()
+{
+    opts="$(getopt -o s:t:m:h --long source:,target:,map:,help -n $SCRIPT_NAME -- ${@})"
+    if [ "${?}" != 0 ]; then
+        perrorl "${SCRIPT_NAME}:" 'Failed to parsing options'
+        usage
+    fi
+    eval set -- "$opts"
+    while true; do
+        case "${1}" in
+        -s | --source ) source_file=( "${2}" ); shift 2 ;;
+        -t | --target ) target_file=( "${2}" ); shift 2 ;;
+        -m | --map ) map_file="${2}"; shift 2 ;;
+        -h | --help ) usage ;;
+        -- ) shift; break ;;
+        * ) die "$ENO_ERROR" "${SCRIPT_NAME}:" 'Internal error' ;;
+        esac
+    done
+    if [ "${#}" = 0 ] && is_empty "$map_file" && [ "${#SSH_HOST_MAP[@]}" = 0 ]; then
+        usage
+    fi
+    if is_empty "$source_file" || is_empty "$target_file"; then
+        usage
+    fi
+    while [ "${#}" -gt 0 ]; do
+        copy "${1}"
+        shift
+    done
+    if is_nonempty "$map_file"; then
+        if ! . "$map_file"; then
+            die "$ENO_ERROR" "${SCRIPT_NAME}:" "Failed to source $map_file"
+        fi
+    fi
+    jump_hosts=()
+    for i in "${SSH_HOST_MAP[@]}"; do
+        eval "declare -a host_list=${i#*=}"
+        for j in "${host_list[@]}"; do
+            copy "$j"
+        done
+        jump_hosts+=( ${host_list[0]} )
+    done
+}
+
+main "${@}"
